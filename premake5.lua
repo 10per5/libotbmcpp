@@ -47,11 +47,10 @@ postbuildcommands({ '"%{cfg.buildtarget.abspath}"' })
 project("example")
 kind("ConsoleApp")
 language("C++")
-files({ "examples/generate_otbm.cpp" })
+files({ "examples/analyze-otbm.cpp" })
 includedirs({ "src" })
 links({ "so" })
 
--- FIX: Use linkoptions for rpath instead of the invalid rpathdirs
 filter("system:linux or system:bsd")
 linkoptions({ "-Wl,-rpath,'$$ORIGIN'" })
 filter("system:macosx")
