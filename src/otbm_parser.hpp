@@ -68,17 +68,14 @@ namespace otbm {
                 if (data_[pos_] != START) return std::unexpected(ParseError::InvalidFormat);
                 uint8_t t = data_[pos_ + 1]; if (t == ESC && pos_ + 2 < data_.size()) t = data_[pos_ + 2]; return t;
             }
-            [[nodiscard]] size_t remaining() const { return data_.size() - pos_; }
         };
 
-                [[nodiscard]] Expected<bool> parse_root(Stream& s) {
-            // Read NODE_START and NodeType::Root
+        [[nodiscard]] Expected<bool> parse_root(Stream& s) {
             auto start = s.read_byte();
             auto type = s.read<uint8_t>();
             if (!start || start.value() != 0xFE || !type || static_cast<NodeType>(type.value()) != NodeType::Root) 
                 return std::unexpected(ParseError::InvalidNode);
             
-            // Now read the actual data
             auto v = s.read<uint32_t>();
             auto w = s.read<uint16_t>();
             auto h = s.read<uint16_t>();
@@ -90,17 +87,16 @@ namespace otbm {
             auto result = parse_map_data(s);
             if (!result) return std::unexpected(result.error());
             
-            // Read NODE_END for Root
             auto end = s.read_byte();
             if (!end || end.value() != 0xFF) return std::unexpected(ParseError::InvalidFormat);
-            
             return true;
         }
 
         [[nodiscard]] Expected<bool> parse_map_data(Stream& s) {
             auto st = s.read_byte(); 
             auto tp = s.read<uint8_t>();
-            if (!st || st.value() != 0xFE || !tp || static_cast<NodeType>(tp.value()) != NodeType::MapData) return std::unexpected(ParseError::InvalidNode);
+            if (!st || st.value() != 0xFE || !tp || static_cast<NodeType>(tp.value()) != NodeType::MapData) 
+                return std::unexpected(ParseError::InvalidNode);
             
             while (true) { 
                 auto p = s.peek(); 
@@ -110,12 +106,53 @@ namespace otbm {
                 if (!d) return std::unexpected(d.error()); 
                 if (on_map_description) on_map_description(d.value()); 
             }
+            
+            auto spawn_type = s.peek();
+            if (spawn_type && spawn_type.value() == static_cast<uint8_t>(DataType::ExtSpawnFile)) {
+                (void)s.read_byte();
+                auto spawn = s.read_string();
+                if (!spawn) return std::unexpected(spawn.error());
+                if (on_map_spawn_file) on_map_spawn_file(spawn.value());
+            }
+            
+            auto house_type = s.peek();
+            if (house_type && house_type.value() == static_cast<uint8_t>(DataType::ExtHouseFile)) {
+                (void)s.read_byte();
+                auto houses = s.read_string();
+                if (!houses) return std::unexpected(houses.error());
+                if (on_map_houses_file) on_map_houses_file(houses.value());
+            }
+            
             while (true) { 
+                auto p = s.peek(); 
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) break; 
+                if (p.value() != 0xFE) break; 
+                
                 auto nt = s.peek_node_type(); 
                 if (!nt || static_cast<NodeType>(nt.value()) != NodeType::TileArea) break; 
                 auto r = parse_tile_area(s); 
                 if (!r) return std::unexpected(r.error()); 
             }
+            
+            auto towns_p = s.peek();
+            if (towns_p && towns_p.value() == 0xFE) {
+                auto nt = s.peek_node_type();
+                if (nt && static_cast<NodeType>(nt.value()) == NodeType::Towns) {
+                    auto r = parse_towns(s); 
+                    if (!r) return std::unexpected(r.error());
+                }
+            }
+            
+            auto waypoints_p = s.peek();
+            if (waypoints_p && waypoints_p.value() == 0xFE) {
+                auto nt = s.peek_node_type();
+                if (nt && static_cast<NodeType>(nt.value()) == NodeType::Waypoints) {
+                    auto r = parse_waypoints(s); 
+                    if (!r) return std::unexpected(r.error());
+                }
+            }
+            
             auto end = s.read_byte(); 
             if (!end || end.value() != 0xFF) return std::unexpected(ParseError::InvalidFormat);
             return true;
@@ -130,6 +167,11 @@ namespace otbm {
             if (!x || !y || !z) return std::unexpected(ParseError::UnexpectedEof);
             
             while (true) { 
+                auto p = s.peek(); 
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) { (void)s.read_byte(); break; }
+                if (p.value() != 0xFE) break;
+                
                 auto nt = s.peek_node_type(); 
                 if (!nt) return std::unexpected(nt.error()); 
                 if (static_cast<NodeType>(nt.value()) == NodeType::Tile) { 
@@ -138,11 +180,8 @@ namespace otbm {
                 } else if (static_cast<NodeType>(nt.value()) == NodeType::HouseTile) { 
                     auto r = parse_house_tile(s, x.value(), y.value(), z.value()); 
                     if(!r) return std::unexpected(r.error()); 
-                } else {
-                    break; 
-                }
+                } else break; 
             }
-            (void)s.read_byte(); 
             return true;
         }
 
@@ -153,7 +192,6 @@ namespace otbm {
             auto dy = s.read<uint8_t>();
             if (!dx || !dy) return std::unexpected(ParseError::UnexpectedEof);
             
-            // FIX: Explicit cast prevents narrowing conversion warning
             uint16_t final_x = static_cast<uint16_t>(bx + dx.value());
             uint16_t final_y = static_cast<uint16_t>(by + dy.value());
             
@@ -190,7 +228,6 @@ namespace otbm {
             auto hid = s.read<uint32_t>();
             if (!dx || !dy || !hid) return std::unexpected(ParseError::UnexpectedEof);
             
-            // FIX: Explicit cast prevents narrowing conversion warning
             uint16_t final_x = static_cast<uint16_t>(bx + dx.value());
             uint16_t final_y = static_cast<uint16_t>(by + dy.value());
             
@@ -232,7 +269,7 @@ namespace otbm {
                         if(!r) return std::unexpected(r.error()); 
                     } else break; 
                 } else { 
-                    (void)s.read_byte(); // Consume attribute type
+                    (void)s.read_byte();
                     switch (static_cast<DataType>(n)) { 
                         case DataType::Count: { 
                             auto v = s.read<uint8_t>(); 
@@ -285,6 +322,65 @@ namespace otbm {
             }
             if (on_item && t) on_item(*t, i, p); 
             return true; 
+        }
+
+        [[nodiscard]] Expected<bool> parse_towns(Stream& s) {
+            (void)s.read_byte(); 
+            (void)s.read<uint8_t>();
+            while (true) {
+                auto p = s.peek(); 
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) { (void)s.read_byte(); break; }
+                if (p.value() != 0xFE) break;
+                auto nt = s.peek_node_type(); 
+                if (!nt || static_cast<NodeType>(nt.value()) != NodeType::Town) break;
+                auto r = parse_town(s); 
+                if (!r) return std::unexpected(r.error());
+            }
+            return true;
+        }
+
+        [[nodiscard]] Expected<bool> parse_town(Stream& s) {
+            (void)s.read_byte(); 
+            (void)s.read<uint8_t>();
+            auto id = s.read<uint32_t>();
+            auto name = s.read_string();
+            auto x = s.read<uint16_t>();
+            auto y = s.read<uint16_t>();
+            auto z = s.read<uint8_t>();
+            if (!id || !name || !x || !y || !z) return std::unexpected(ParseError::UnexpectedEof);
+            if (on_town) on_town({id.value(), std::move(name.value()), {x.value(), y.value(), z.value()}});
+            (void)s.read_byte(); // NODE_END
+            return true;
+        }
+
+        [[nodiscard]] Expected<bool> parse_waypoints(Stream& s) {
+            (void)s.read_byte(); 
+            (void)s.read<uint8_t>();
+            while (true) {
+                auto p = s.peek(); 
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) { (void)s.read_byte(); break; }
+                if (p.value() != 0xFE) break;
+                auto nt = s.peek_node_type(); 
+                if (!nt || static_cast<NodeType>(nt.value()) != NodeType::Waypoint) break;
+                auto r = parse_waypoint(s); 
+                if (!r) return std::unexpected(r.error());
+            }
+            return true;
+        }
+
+        [[nodiscard]] Expected<bool> parse_waypoint(Stream& s) {
+            (void)s.read_byte(); 
+            (void)s.read<uint8_t>();
+            auto name = s.read_string();
+            auto x = s.read<uint16_t>();
+            auto y = s.read<uint16_t>();
+            auto z = s.read<uint8_t>();
+            if (!name || !x || !y || !z) return std::unexpected(ParseError::UnexpectedEof);
+            if (on_waypoint) on_waypoint({std::move(name.value()), {x.value(), y.value(), z.value()}});
+            (void)s.read_byte(); // NODE_END
+            return true;
         }
     };
 }

@@ -13,26 +13,19 @@ filter("configurations:Release")
 defines({ "NDEBUG" })
 optimize("On")
 runtime("Release")
-filter({}) -- Reset filter
+filter({})
 
--- =============================================================================
--- 1. Static Library (Produces .lib on Windows, .a on Linux/macOS)
--- =============================================================================
 project("lib")
 kind("StaticLib")
 language("C++")
 files({ "src/*.hpp" })
 includedirs({ "src" })
 
--- =============================================================================
--- 2. Shared Library (Produces .dll on Windows, .so on Linux/macOS)
--- =============================================================================
 project("so")
 kind("SharedLib")
 language("C++")
 files({ "src/*.hpp" })
 includedirs({ "src" })
-
 filter("system:windows")
 defines({ "OTBM_BUILD_DLL" })
 filter({})
@@ -48,28 +41,57 @@ files({
 })
 includedirs({ "src", "tests" })
 links({ "lib" })
-
 postbuildcommands({ '"%{cfg.buildtarget.abspath}"' })
 
--- =============================================================================
--- Custom Premake Action: `premake5 test`
--- =============================================================================
+-- Example project (uses shared library)
+project("example")
+kind("ConsoleApp")
+language("C++")
+files({ "examples/generate_otbm.cpp" })
+includedirs({ "src" })
+links({ "so" })
+
+-- FIX: Use linkoptions for rpath instead of the invalid rpathdirs
+filter("system:linux or system:bsd")
+linkoptions({ "-Wl,-rpath,'$$ORIGIN'" })
+filter("system:macosx")
+linkoptions({ "-Wl,-rpath,@executable_path" })
+filter({})
+
+-- Custom action: Build and run the example
 newaction({
-	trigger = "test",
-	description = "Generate build files, compile, and run all tests automatically",
+	trigger = "example",
+	description = "Build and run the fixture generator",
 	execute = function()
-		-- 1. Generate native build files
 		if os.target() == "windows" then
 			premake.action.call("vs2022")
 		else
 			premake.action.call("gmake2")
 		end
 
-		-- 2. Build and Run the 'test' target
+		if os.target() == "windows" then
+			os.execute("msbuild otb_parsers.sln /p:Configuration=Debug /p:Platform=x64 /t:example")
+			os.execute("bin\\Debug\\example.exe")
+		else
+			os.execute("make -j4 config=debug_x64 example")
+			os.execute("./bin/Debug/example")
+		end
+	end,
+})
+
+-- Custom action: Generate fixture, build, and run tests
+newaction({
+	trigger = "test",
+	description = "Generate fixture, build, and run all tests",
+	execute = function()
+		-- Generate fixture first
+		premake.action.call("example")
+
+		-- Then build and run tests
 		if os.target() == "windows" then
 			os.execute("msbuild otb_parsers.sln /p:Configuration=Debug /p:Platform=x64 /t:test")
 		else
-			os.execute("make -j4 config=debug_x64")
+			os.execute("make -j4 config=debug_x64 test")
 		end
 	end,
 })
