@@ -5,23 +5,31 @@
 #include <cassert>
 #include <iostream>
 #include <filesystem>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 inline void test_otbm_integration() {
     std::cout << "  [RUN] OTBM Integration (fixture)...\n";
     
     std::filesystem::path fixture_path = "tests/fixture/world.otbm";
-    std::ifstream file(fixture_path, std::ios::binary | std::ios::ate);
-    
-    if (!file.is_open()) {
+
+    // Load the whole file via mmap (same robust approach as analyze-otbm.cpp).
+    // std::ifstream + tellg/seekg can leave the stream in a bad state and yield
+    // a zeroed buffer, which the parser then rejects with InvalidNode.
+    int fd = open(fixture_path.string().c_str(), O_RDONLY);
+    if (fd == -1) {
         std::cout << "  [SKIP] Fixture not found: " << fixture_path << "\n";
         return;
     }
-    
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::vector<uint8_t> buffer(size);
-    assert(file.read(reinterpret_cast<char*>(buffer.data()), size));
-    
+    struct stat sb;
+    if (fstat(fd, &sb) == -1) { close(fd); std::cout << "  [SKIP] Cannot stat fixture\n"; return; }
+    const size_t size = static_cast<size_t>(sb.st_size);
+    const uint8_t* mapped = static_cast<const uint8_t*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
+    if (mapped == MAP_FAILED) { close(fd); std::cout << "  [SKIP] mmap failed\n"; return; }
+    std::span<const uint8_t> buffer(mapped, size);
+
     otbm::Parser parser;
     uint32_t tile_count = 0, item_count = 0, town_count = 0, waypoint_count = 0;
     bool description_found = false;
@@ -54,4 +62,7 @@ inline void test_otbm_integration() {
               << item_count << " items, "
               << town_count << " towns, "
               << waypoint_count << " waypoints\n";
+
+    munmap(const_cast<uint8_t*>(mapped), size);
+    close(fd);
 }

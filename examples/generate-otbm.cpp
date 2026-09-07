@@ -9,7 +9,9 @@ class OTBMWriter {
     std::vector<uint8_t> buffer;
     
     void write_byte(uint8_t b) {
-        if (b == 0xFD) buffer.push_back(0xFD); // Escape
+        // OTBM escapes all three control bytes (0xFD escape, 0xFE node start,
+        // 0xFF node end); the reader un-escapes any 0xFD-prefixed byte.
+        if (b == 0xFD || b == 0xFE || b == 0xFF) buffer.push_back(0xFD);
         buffer.push_back(b);
     }
     

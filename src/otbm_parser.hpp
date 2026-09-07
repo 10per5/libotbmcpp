@@ -29,7 +29,7 @@ namespace otbm {
     };
     
     struct Position { uint16_t x{0}, y{0}; uint8_t z{0}; };
-    struct Tile { Position pos; uint32_t flags{0}; };
+    struct Tile { Position pos; uint32_t flags{0}; uint32_t house_id{0}; };
     struct Item { 
         uint16_t type{0}; uint8_t count{1}; uint16_t aid{0}, uid{0}, charges{0}; 
         std::string text; bool is_portal{false}; Position portal_exit; 
@@ -306,7 +306,7 @@ namespace otbm {
             auto hid = s.read<uint32_t>();
             if (!dx || !dy || !hid) return std::unexpected(ParseError::UnexpectedEof);
             
-            Tile t{{static_cast<uint16_t>(bx + dx.value()), static_cast<uint16_t>(by + dy.value()), z}, 0};
+            Tile t{{static_cast<uint16_t>(bx + dx.value()), static_cast<uint16_t>(by + dy.value()), z}, 0, hid.value()};
             if (on_tile) on_tile(t);
             
             return parse_tile_common(s, t, hid.value());

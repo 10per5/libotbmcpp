@@ -1,0 +1,25 @@
+# predep.toml — build the libotbm shared library (.so)
+#
+# libotbm is self-contained (header-only sources in src/, no external deps),
+# so there is nothing to vendor. The single `so` project in premake5.lua
+# (SharedLib over src/*.hpp) compiles both parsers — otbm_parser.hpp and
+# otb_parser.hpp — into one shared object.
+#
+# Build:  predep --config predep.toml build
+#   -> premake5 gmake && make config=release so
+#   -> bin/Release/libso.so
+
+main = "build"
+project = "libotbm"
+
+[[stages]]
+name = "build"
+description = "Build libotbm + libotb shared library (.so)"
+type = "premake5"
+# No vendor stage: the library has no external dependencies.
+config = "release"
+# Build only the shared-library target so we don't also build test/example.
+target = "so"
+outputs = ["root://bin/Release/libotbmcpp.so"]
+clean = true
+clean_paths = ["root://obj", "root://bin"]
