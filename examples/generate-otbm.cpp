@@ -15,8 +15,10 @@ class OTBMWriter {
         buffer.push_back(b);
     }
     
-    void write_node_start() { write_byte(0xFE); }
-    void write_node_end() { write_byte(0xFF); }
+    // Node start/end markers (0xFE/0xFF) are STRUCTURAL and written raw.
+    // Only data bytes are escaped (see write_byte).
+    void write_node_start() { buffer.push_back(0xFE); }
+    void write_node_end() { buffer.push_back(0xFF); }
     
     template<typename T>
     void write(T value) {
@@ -121,7 +123,7 @@ public:
     }
 };
 
-int main() {
+int generate_main() {
     std::cout << "Generating OTBM fixture...\n";
     
     OTBMWriter writer;

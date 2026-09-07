@@ -206,7 +206,7 @@ private:
     }
 };
 
-int main(int argc, char* argv[]) {
+int analyze_main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <otbm_file>\n";
         return 1;

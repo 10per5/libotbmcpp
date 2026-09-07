@@ -3,6 +3,7 @@
 #include <fstream>
 #include <vector>
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
 #include <filesystem>
 #include <fcntl.h>
@@ -48,13 +49,15 @@ inline void test_otbm_integration() {
         std::cerr << "  [FAIL] Parser returned error code: " << static_cast<int>(result.error()) << "\n";
     }
     
-    assert(result.has_value() && "Parser should complete without error");
-    assert(captured_width > 0 && captured_height > 0 && "Map dimensions should be valid");
-    assert(description_found && "Map should have a description");
-    assert(town_count > 0 && "Map should have at least 1 town");
-    assert(waypoint_count > 0 && "Map should have at least 1 waypoint");
-    assert(tile_count > 0 && "Map should have tiles");
-    assert(item_count > 0 && "Map should have items");
+    // NOTE: assert() is compiled out under NDEBUG (Release), so we fail loudly
+    // here with std::abort() regardless of build config.
+    if (!result.has_value()) { std::cerr << "  [FAIL] Parser should complete without error\n"; std::abort(); }
+    if (!(captured_width > 0 && captured_height > 0)) { std::cerr << "  [FAIL] Map dimensions should be valid\n"; std::abort(); }
+    if (!description_found) { std::cerr << "  [FAIL] Map should have a description\n"; std::abort(); }
+    if (!(town_count > 0)) { std::cerr << "  [FAIL] Map should have at least 1 town\n"; std::abort(); }
+    if (!(waypoint_count > 0)) { std::cerr << "  [FAIL] Map should have at least 1 waypoint\n"; std::abort(); }
+    if (!(tile_count > 0)) { std::cerr << "  [FAIL] Map should have tiles\n"; std::abort(); }
+    if (!(item_count > 0)) { std::cerr << "  [FAIL] Map should have items\n"; std::abort(); }
     
     std::cout << "  [OK]  Integration passed: " 
               << captured_width << "x" << captured_height 
