@@ -83,8 +83,16 @@ namespace otbm {
                 if (b == ESC) { 
                     if (pos_ >= data_.size()) return std::unexpected(ParseError::UnexpectedEof); 
                     b = data_[pos_++]; 
-                }
+                } 
                 return b;
+            }
+
+            // Like read_byte() but does NOT process the ESC prefix. Needed by
+            // skip_node() so that an escaped 0xFE/0xFF data byte is treated as
+            // data rather than a structural marker (finding #A4).
+            [[nodiscard]] Expected<uint8_t> read_byte_raw() {
+                if (pos_ >= data_.size()) return std::unexpected(ParseError::UnexpectedEof);
+                return data_[pos_++];
             }
 
             template<typename T> [[nodiscard]] Expected<T> read() {
@@ -127,15 +135,14 @@ namespace otbm {
 
         [[nodiscard]] Expected<bool> skip_node(Stream& s) {
             int depth = 0;
+            bool escaped = false;
             while (true) {
-                auto b = s.read_byte();
+                auto b = s.read_byte_raw();
                 if (!b) return std::unexpected(ParseError::UnexpectedEof);
-                if (b.value() == 0xFE) {
-                    depth++;
-                } else if (b.value() == 0xFF) {
-                    if (depth == 0) return true;
-                    depth--;
-                }
+                if (escaped) { escaped = false; continue; }           // literal data byte after ESC
+                if (b.value() == 0xFD) { escaped = true; continue; } // escape prefix: next byte is data
+                if (b.value() == 0xFE) depth++;
+                else if (b.value() == 0xFF) { if (depth == 0) return true; depth--; }
             }
         }
 
@@ -193,12 +200,12 @@ namespace otbm {
                         auto houses = s.read_string(); if (!houses) return std::unexpected(houses.error());
                         if (on_map_houses_file) on_map_houses_file(houses.value()); break;
                     }
-                    default: {
-                        // All string-based map attributes in standard OTBM are string length prefixed
-                        auto skip = s.read_string();
-                        if (!skip) return std::unexpected(skip.error());
-                        break;
-                    }
+                    default:
+                        // The known map-level attributes (handled above) are all
+                        // length-prefixed strings. Any other id is not a recognised
+                        // map attribute, and assuming "string" would desync the
+                        // stream on a non-string value (finding #A2). Fail loudly.
+                        return std::unexpected(ParseError::InvalidFormat);
                 }
             }
             
@@ -274,13 +281,14 @@ namespace otbm {
                     auto f = s.read<uint32_t>(); 
                     if (f) t.flags = f.value(); 
                 } else if (n == static_cast<uint8_t>(DataType::Item)) {
+                    // A flat item reference inside a tile's attribute list. Read the
+                    // id to stay in sync, but do NOT emit on_item here: the item's
+                    // full, complete record is delivered exactly once by parse_item()
+                    // (the early call below used to fire a second, half-populated
+                    // callback; see finding #A5).
                     (void)s.read_byte();
-                    Item i;
                     auto it = s.read<uint16_t>();
-                    if (it) {
-                        i.type = it.value();
-                        if (on_item) on_item(t, i, nullptr);
-                    }
+                    if (!it) return std::unexpected(it.error());
                 } else {
                     (void)s.read_byte();
                 }
@@ -312,6 +320,57 @@ namespace otbm {
             return parse_tile_common(s, t, hid.value());
         }
 
+        // Consume exactly the value bytes of a known attribute, without storing
+        // them. Widths follow the OTBM spec (cf. RME's iomap_otbm.cpp: e.g.
+        // RuneCharges is u8, Charges/ActionId/UniqueId/DepotId are u16, TeleDest
+        // is 5 bytes, and the string-typed attributes are length-prefixed).
+        [[nodiscard]] Expected<bool> skip_value(Stream& s, DataType t) {
+            switch (t) {
+                case DataType::Description:
+                case DataType::ExtFile:
+                case DataType::ExtSpawnFile:
+                case DataType::ExtHouseFile:
+                case DataType::Desc:
+                case DataType::WrittenBy: {
+                    auto r = s.read_string();
+                    if (!r) return std::unexpected(r.error());
+                    return true;
+                }
+                case DataType::RuneCharges:
+                case DataType::Count:
+                case DataType::HouseDoorId:
+                case DataType::DecayingState: {
+                    auto r = s.read<uint8_t>();
+                    if (!r) return std::unexpected(r.error());
+                    return true;
+                }
+                case DataType::ActionId:
+                case DataType::UniqueId:
+                case DataType::DepotId:
+                case DataType::Charges:
+                case DataType::Item: {
+                    auto r = s.read<uint16_t>();
+                    if (!r) return std::unexpected(r.error());
+                    return true;
+                }
+                case DataType::TileFlags:
+                case DataType::Duration:
+                case DataType::WrittenDate:
+                case DataType::SleeperGuid:
+                case DataType::SleepStart: {
+                    auto r = s.read<uint32_t>();
+                    if (!r) return std::unexpected(r.error());
+                    return true;
+                }
+                case DataType::TeleDest: {
+                    auto a = s.read<uint16_t>(); auto b = s.read<uint16_t>(); auto c = s.read<uint8_t>();
+                    if (!a || !b || !c) return std::unexpected(ParseError::UnexpectedEof);
+                    return true;
+                }
+            }
+            return std::unexpected(ParseError::InvalidFormat);
+        }
+
         [[nodiscard]] Expected<bool> parse_item(Stream& s, const Tile* t, const Item* p, uint32_t hid = 0) {
             (void)s.read_byte(); (void)s.read<uint8_t>(); 
             Item i; auto it = s.read<uint16_t>(); if (!it) return std::unexpected(ParseError::UnexpectedEof); 
@@ -329,17 +388,43 @@ namespace otbm {
                     }
                 } else { 
                     (void)s.read_byte();
-                    switch (static_cast<DataType>(n)) { 
-                        case DataType::Count: { auto v = s.read<uint8_t>(); if(v) i.count = v.value(); break; } 
-                        case DataType::TeleDest: { i.is_portal = true; auto px = s.read<uint16_t>(); auto py = s.read<uint16_t>(); auto pz = s.read<uint8_t>(); if (px && py && pz) i.portal_exit = {px.value(), py.value(), pz.value()}; break; } 
-                        case DataType::DepotId: { i.is_depot = true; auto v = s.read<uint16_t>(); if(v) i.depot_id = v.value(); break; }
-                        case DataType::Text: { auto v = s.read_string(); if(v) i.text = std::move(v.value()); break; }
-                        case DataType::Charges: { auto v = s.read<uint16_t>(); if(v) i.charges = v.value(); break; }
-                        case DataType::ActionId: { auto v = s.read<uint16_t>(); if(v) i.aid = v.value(); break; }
-                        case DataType::UniqueId: { auto v = s.read<uint16_t>(); if(v) i.uid = v.value(); break; }
-                        case DataType::HouseDoorId: { i.is_house_door = true; auto v = s.read<uint8_t>(); if(v) i.door_id = v.value(); break; }
-                        default: break; 
-                    } 
+                    auto dt = static_cast<DataType>(n);
+                    switch (dt) {
+                        case DataType::Count: { auto v = s.read<uint8_t>(); if (!v) return std::unexpected(v.error()); i.count = v.value(); break; }
+                        case DataType::TeleDest: { i.is_portal = true; auto px = s.read<uint16_t>(); auto py = s.read<uint16_t>(); auto pz = s.read<uint8_t>(); if (!px || !py || !pz) return std::unexpected(ParseError::UnexpectedEof); i.portal_exit = {px.value(), py.value(), pz.value()}; break; }
+                        case DataType::DepotId: { i.is_depot = true; auto v = s.read<uint16_t>(); if (!v) return std::unexpected(v.error()); i.depot_id = v.value(); break; }
+                        case DataType::Text: { auto v = s.read_string(); if (!v) return std::unexpected(v.error()); i.text = std::move(v.value()); break; }
+                        case DataType::Charges: { auto v = s.read<uint16_t>(); if (!v) return std::unexpected(v.error()); i.charges = v.value(); break; }
+                        case DataType::ActionId: { auto v = s.read<uint16_t>(); if (!v) return std::unexpected(v.error()); i.aid = v.value(); break; }
+                        case DataType::UniqueId: { auto v = s.read<uint16_t>(); if (!v) return std::unexpected(v.error()); i.uid = v.value(); break; }
+                        case DataType::HouseDoorId: { i.is_house_door = true; auto v = s.read<uint8_t>(); if (!v) return std::unexpected(v.error()); i.door_id = v.value(); break; }
+                        // Known item attributes this parser does not surface: skip them
+                        // by their documented width so the stream stays synchronised.
+                        // (Consuming nothing — the old behaviour — desyncs every later
+                        // attribute; see finding #A3.)
+                        case DataType::Description:
+                        case DataType::ExtFile:
+                        case DataType::ExtSpawnFile:
+                        case DataType::ExtHouseFile:
+                        case DataType::Desc:
+                        case DataType::WrittenBy:
+                        case DataType::RuneCharges:
+                        case DataType::TileFlags:
+                        case DataType::Duration:
+                        case DataType::DecayingState:
+                        case DataType::WrittenDate:
+                        case DataType::SleeperGuid:
+                        case DataType::SleepStart:
+                        case DataType::Item: {
+                            auto r = skip_value(s, dt);
+                            if (!r) return std::unexpected(r.error());
+                            break;
+                        }
+                        default:
+                            // Truly unknown item attribute: fail loudly instead of
+                            // silently desyncing the stream.
+                            return std::unexpected(ParseError::InvalidFormat);
+                    }
                 } 
             }
             if (on_item && t) on_item(*t, i, p); 

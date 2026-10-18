@@ -8,6 +8,8 @@ int main() {
     // Unit tests
     test_otbm_parser();
     test_otb_parser();
+    test_otbm_parser_robustness();
+    test_otb_parser_features();
     
     // Integration test
     test_otbm_integration();
