@@ -9,10 +9,12 @@ int main() {
     test_otbm_parser();
     test_otb_parser();
     test_otbm_parser_robustness();
+    test_otbm_parser_spawns();
     test_otb_parser_features();
     
-    // Integration test
+    // Integration tests
     test_otbm_integration();
+    test_otbm_integration_with_spawns();
     
     std::cout << "=== All tests passed ===\n";
     return 0;

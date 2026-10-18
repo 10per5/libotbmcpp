@@ -37,6 +37,7 @@ namespace otbm {
     };
     struct Waypoint { std::string name; Position pos; };
     struct Town { uint32_t id{0}; std::string name; Position pos; };
+    struct Spawn { Position pos{}; uint32_t radius{0}; std::string name; };
     struct Version { uint32_t major{0}, minor{0}; };
     struct MapHeader { Version map_version; uint16_t width{0}, height{0}; Version items_version; };
 
@@ -49,6 +50,7 @@ namespace otbm {
         std::function<void(std::string_view)> on_map_description, on_map_spawn_file, on_map_houses_file;
         std::function<void(const Town&)> on_town;
         std::function<void(const Waypoint&)> on_waypoint;
+        std::function<void(const Spawn&)> on_spawn;
         std::function<void(const Tile&)> on_tile;
         std::function<void(const Tile&, const Item&, const Item* parent)> on_item;
 
@@ -146,6 +148,102 @@ namespace otbm {
             }
         }
 
+        // TFS OTBM spawn-area / monster attribute ids. They sit just past the
+        // standard item-attribute range (0x01..0x16). These are best-effort
+        // values taken from the TFS format; if spawns come out empty on your real
+        // maps, these three ids are the thing to verify / adjust.
+        static constexpr uint8_t kSpawnAttrRadius = 0x17;
+        static constexpr uint8_t kSpawnAttrName   = 0x18;
+        static constexpr uint8_t kSpawnAttrTime   = 0x19;
+
+        // ---- Spawns (finding #A1) -------------------------------------------------
+        // The OTBM binary can embed a NODE_SPAWNS subtree (TFS does; RME does not
+        // — it externalises spawns to spawns.xml). Surface each monster via on_spawn.
+        [[nodiscard]] Expected<bool> parse_spawns(Stream& s) {
+            (void)s.read_byte(); (void)s.read<uint8_t>();   // NODE_SPAWNS start + type
+            while (true) {
+                auto p = s.peek();
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) { (void)s.read_byte(); return true; }   // spawns end
+                if (p.value() != 0xFE) { (void)s.read_byte(); continue; }
+                auto nt = s.peek_node_type();
+                if (!nt) return std::unexpected(nt.error());
+                if (static_cast<NodeType>(nt.value()) == NodeType::SpawnArea) {
+                    auto r = parse_spawn_area(s);
+                    if (!r) return std::unexpected(r.error());
+                } else {
+                    auto r = skip_node(s);
+                    if (!r) return std::unexpected(r.error());
+                }
+            }
+        }
+
+        [[nodiscard]] Expected<bool> parse_spawn_area(Stream& s) {
+            (void)s.read_byte(); (void)s.read<uint8_t>();   // NODE_SPAWN_AREA start + type
+            auto cx = s.read<uint16_t>();
+            auto cy = s.read<uint16_t>();
+            auto cz = s.read<uint8_t>();
+            if (!cx || !cy || !cz) return std::unexpected(ParseError::UnexpectedEof);
+            Position center{cx.value(), cy.value(), cz.value()};
+            uint32_t radius = 0;
+            while (true) {
+                auto p = s.peek();
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) { (void)s.read_byte(); break; }   // area end
+                if (p.value() == 0xFE) {
+                    auto nt = s.peek_node_type();
+                    if (!nt) return std::unexpected(nt.error());
+                    if (static_cast<NodeType>(nt.value()) == NodeType::Monster) {
+                        auto r = parse_monster(s, center, radius);
+                        if (!r) return std::unexpected(r.error());
+                    } else {
+                        auto r = skip_node(s);
+                        if (!r) return std::unexpected(r.error());
+                    }
+                } else {
+                    (void)s.read_byte();
+                    auto attr = static_cast<uint8_t>(p.value());
+                    if (attr == kSpawnAttrRadius) {
+                        auto v = s.read<uint32_t>();
+                        if (!v) return std::unexpected(v.error());
+                        radius = v.value();
+                    } else {
+                        // Unknown area attribute: assume u32 to stay in sync.
+                        auto v = s.read<uint32_t>();
+                        if (!v) return std::unexpected(v.error());
+                    }
+                }
+            }
+            return true;
+        }
+
+        [[nodiscard]] Expected<bool> parse_monster(Stream& s, const Position& center, uint32_t radius) {
+            (void)s.read_byte(); (void)s.read<uint8_t>();   // NODE_MONSTER start + type
+            std::string name;
+            while (true) {
+                auto p = s.peek();
+                if (!p) return std::unexpected(p.error());
+                if (p.value() == 0xFF) { (void)s.read_byte(); break; }   // monster end
+                if (p.value() == 0xFE) {                                  // unexpected nested node -> skip
+                    auto r = skip_node(s);
+                    if (!r) return std::unexpected(r.error());
+                    continue;
+                }
+                (void)s.read_byte();
+                auto attr = static_cast<uint8_t>(p.value());
+                if (attr == kSpawnAttrName) {
+                    auto v = s.read_string();
+                    if (!v) return std::unexpected(v.error());
+                    name = std::move(v.value());
+                } else {  // kSpawnAttrTime or any other: u32
+                    auto v = s.read<uint32_t>();
+                    if (!v) return std::unexpected(v.error());
+                }
+            }
+            if (on_spawn) on_spawn(Spawn{center, radius, name});
+            return true;
+        }
+
         [[nodiscard]] Expected<bool> parse_root(Stream& s) {
             auto start = s.read_byte();
             auto type = s.read<uint8_t>();
@@ -226,7 +324,16 @@ namespace otbm {
                         auto r = parse_tile_area(s); if (!r) return std::unexpected(r.error()); break;
                     }
                     case NodeType::Spawns: {
-                        auto r = skip_node(s); if (!r) return std::unexpected(r.error()); break;
+                        auto r = parse_spawns(s);
+                        if (!r) {
+                            // Best-effort spawn parse failed (e.g. an attribute id this
+                            // build doesn't recognise). Don't let that corrupt the rest of
+                            // the map — skip the whole subtree the way we used to, and keep
+                            // parsing towns/waypoints/etc.
+                            auto sk = skip_node(s);
+                            if (!sk) return std::unexpected(sk.error());
+                        }
+                        break;
                     }
                     case NodeType::Towns: {
                         auto r = parse_towns(s); if (!r) return std::unexpected(r.error()); break;

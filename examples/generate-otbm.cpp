@@ -7,7 +7,12 @@
 // Helper to write bytes to buffer
 class OTBMWriter {
     std::vector<uint8_t> buffer;
+    bool embed_spawns = false;
     
+public:
+    void set_embed_spawns(bool v) { embed_spawns = v; }
+    
+private:
     void write_byte(uint8_t b) {
         // OTBM escapes all three control bytes (0xFD escape, 0xFE node start,
         // 0xFF node end); the reader un-escapes any 0xFD-prefixed byte.
@@ -60,9 +65,11 @@ public:
                 write_byte(0x01); // DataType::Description
                 write_string("Integration Test Map - Generated Fixture");
                 
-                // Spawn file
-                write_byte(0x0B); // DataType::ExtSpawnFile
-                write_string("spawns.xml");
+                // Spawn file (external reference, unless spawns are embedded inline)
+                if (!embed_spawns) {
+                    write_byte(0x0B); // DataType::ExtSpawnFile
+                    write_string("spawns.xml");
+                }
                 
                 // House file
                 write_byte(0x0D); // DataType::ExtHouseFile
@@ -110,6 +117,28 @@ public:
                         write<uint8_t>(7);             // Z
                     });
                 });
+                
+                // Embedded spawns (TFS-style NODE_SPAWNS) — only when requested.
+                // Exercises finding #A1: the parser surfaces each monster via on_spawn.
+                if (embed_spawns) {
+                    write_node(0x09, [&]() {                       // NODE_SPAWNS
+                        write_node(0x0A, [&]() {                   // NODE_SPAWN_AREA
+                            write<uint16_t>(50);                   // center X
+                            write<uint16_t>(50);                   // center Y
+                            write<uint8_t>(7);                     // center Z
+                            write_byte(0x17);                      // kSpawnAttrRadius
+                            write<uint32_t>(15);                   // radius
+                            write_node(0x0B, [&]() {               // NODE_MONSTER
+                                write_byte(0x18);                  // kSpawnAttrName
+                                write_string("dragon");
+                            });
+                            write_node(0x0B, [&]() {               // NODE_MONSTER
+                                write_byte(0x18);                  // kSpawnAttrName
+                                write_string("rat");
+                            });
+                        });
+                    });
+                }
             });
         });
     }
@@ -123,13 +152,20 @@ public:
     }
 };
 
-int generate_main() {
-    std::cout << "Generating OTBM fixture...\n";
+int generate_main(int argc, char* argv[]) {
+    bool embed_spawns = false;
+    std::string output_path = "tests/fixture/world.otbm";
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--embed-spawns" || arg == "-s") embed_spawns = true;
+        else if ((arg == "--output" || arg == "-o") && i + 1 < argc) output_path = argv[++i];
+    }
+    std::cout << "Generating OTBM fixture" << (embed_spawns ? " (with embedded spawns)" : "") << "...\n";
     
     OTBMWriter writer;
+    writer.set_embed_spawns(embed_spawns);
     writer.generate();
     
-    std::string output_path = "tests/fixture/world.otbm";
     if (writer.save(output_path)) {
         std::cout << "✓ Fixture saved to: " << output_path << "\n";
         return 0;
